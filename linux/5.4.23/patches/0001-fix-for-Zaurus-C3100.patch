@@ -1,0 +1,668 @@
+From 8b4ba0ebc9f032b3e2f4c7f825b3ac4e86d4992a Mon Sep 17 00:00:00 2001
+From: Cain Wu <cainbit@gmail.com>
+Date: Sun, 1 Mar 2020 17:52:43 +0800
+Subject: [PATCH] fix for Zaurus C3100
+
+---
+ arch/arm/mach-pxa/spitz.c                | 18 ++----
+ drivers/ata/pata_pcmcia.c                |  2 +
+ drivers/mmc/core/slot-gpio.c             | 82 +++++++++++++++++++++++-
+ drivers/mmc/host/mmc_spi.c               | 27 ++++----
+ drivers/mmc/host/of_mmc_spi.c            | 34 ++++++++++
+ drivers/mmc/host/pxamci.c                | 68 ++++++++++++--------
+ drivers/pcmcia/soc_common.c              | 74 ++++++++++++++-------
+ drivers/pcmcia/soc_common.h              |  3 -
+ include/linux/mmc/slot-gpio.h            |  4 ++
+ include/linux/platform_data/mmc-pxamci.h |  4 ++
+ include/linux/spi/mmc_spi.h              | 15 +++++
+ 11 files changed, 250 insertions(+), 81 deletions(-)
+
+diff --git a/arch/arm/mach-pxa/spitz.c b/arch/arm/mach-pxa/spitz.c
+index a4fdc399d..cf2f45f00 100644
+--- a/arch/arm/mach-pxa/spitz.c
++++ b/arch/arm/mach-pxa/spitz.c
+@@ -14,7 +14,6 @@
+ #include <linux/delay.h>
+ #include <linux/gpio_keys.h>
+ #include <linux/gpio.h>
+-#include <linux/gpio/machine.h>
+ #include <linux/leds.h>
+ #include <linux/i2c.h>
+ #include <linux/platform_data/i2c-pxa.h>
+@@ -612,22 +611,13 @@ static struct pxamci_platform_data spitz_mci_platform_data = {
+ 	.detect_delay_ms	= 250,
+ 	.ocr_mask		= MMC_VDD_32_33|MMC_VDD_33_34,
+ 	.setpower		= spitz_mci_setpower,
+-};
+-
+-static struct gpiod_lookup_table spitz_mci_gpio_table = {
+-	.dev_id = "pxa2xx-mci.0",
+-	.table = {
+-		GPIO_LOOKUP("gpio-pxa", SPITZ_GPIO_nSD_DETECT,
+-			    "cd", GPIO_ACTIVE_LOW),
+-		GPIO_LOOKUP("gpio-pxa", SPITZ_GPIO_nSD_WP,
+-			    "wp", GPIO_ACTIVE_LOW),
+-		{ },
+-	},
++	.gpio_card_detect	= SPITZ_GPIO_nSD_DETECT,
++	.gpio_card_ro		= SPITZ_GPIO_nSD_WP,
++	.gpio_power		= -1,
+ };
+ 
+ static void __init spitz_mmc_init(void)
+ {
+-	gpiod_add_lookup_table(&spitz_mci_gpio_table);
+ 	pxa_set_mci_info(&spitz_mci_platform_data);
+ }
+ #else
+@@ -662,7 +652,7 @@ static struct pxaohci_platform_data spitz_ohci_platform_data = {
+ 	.init		= spitz_ohci_init,
+ 	.exit		= spitz_ohci_exit,
+ 	.flags		= ENABLE_PORT_ALL | NO_OC_PROTECTION,
+-	.power_budget	= 150,
++	.power_budget	= 180,
+ };
+ 
+ static void __init spitz_uhc_init(void)
+diff --git a/drivers/ata/pata_pcmcia.c b/drivers/ata/pata_pcmcia.c
+index 3fe0754c0..86708a869 100644
+--- a/drivers/ata/pata_pcmcia.c
++++ b/drivers/ata/pata_pcmcia.c
+@@ -301,6 +301,7 @@ static const struct pcmcia_device_id pcmcia_devices[] = {
+ 	PCMCIA_DEVICE_MANF_CARD(0x0007, 0x0000),	/* Hitachi */
+ 	PCMCIA_DEVICE_MANF_CARD(0x000a, 0x0000),	/* I-O Data CFA */
+ 	PCMCIA_DEVICE_MANF_CARD(0x001c, 0x0001),	/* Mitsubishi CFA */
++	PCMCIA_DEVICE_MANF_CARD(0x001f, 0x0101),	/* SanDisk SDCFHS-008G */
+ 	PCMCIA_DEVICE_MANF_CARD(0x0032, 0x0704),
+ 	PCMCIA_DEVICE_MANF_CARD(0x0032, 0x2904),
+ 	PCMCIA_DEVICE_MANF_CARD(0x0045, 0x0401),	/* SanDisk CFA */
+@@ -344,6 +345,7 @@ static const struct pcmcia_device_id pcmcia_devices[] = {
+ 	PCMCIA_DEVICE_PROD_ID12("PCMCIA", "CD-ROM", 0x281f1c5d, 0x66536591),
+ 	PCMCIA_DEVICE_PROD_ID12("PCMCIA", "PnPIDE", 0x281f1c5d, 0x0c694728),
+ 	PCMCIA_DEVICE_PROD_ID12("SHUTTLE TECHNOLOGY LTD.", "PCCARD-IDE/ATAPI Adapter", 0x4a3f0ba0, 0x322560e1),
++	PCMCIA_DEVICE_PROD_ID12("SANDISK", "SDCFHS-008G", 0x2a5f2361, 0x9128375c),
+ 	PCMCIA_DEVICE_PROD_ID12("SEAGATE", "ST1", 0x87c1b330, 0xe1f30883),
+ 	PCMCIA_DEVICE_PROD_ID12("SAMSUNG", "04/05/06", 0x43d74cb4, 0x6a22777d),
+ 	PCMCIA_DEVICE_PROD_ID12("SMI VENDOR", "SMI PRODUCT", 0x30896c92, 0x703cc5f6),
+diff --git a/drivers/mmc/core/slot-gpio.c b/drivers/mmc/core/slot-gpio.c
+index 582ec3d72..55802311b 100644
+--- a/drivers/mmc/core/slot-gpio.c
++++ b/drivers/mmc/core/slot-gpio.c
+@@ -6,6 +6,7 @@
+  */
+ 
+ #include <linux/err.h>
++#include <linux/gpio.h>
+ #include <linux/gpio/consumer.h>
+ #include <linux/interrupt.h>
+ #include <linux/jiffies.h>
+@@ -19,6 +20,7 @@
+ struct mmc_gpio {
+ 	struct gpio_desc *ro_gpio;
+ 	struct gpio_desc *cd_gpio;
++	bool override_ro_active_level;
+ 	bool override_cd_active_level;
+ 	irqreturn_t (*cd_gpio_isr)(int irq, void *dev_id);
+ 	char *ro_label;
+@@ -93,6 +95,36 @@ int mmc_gpio_get_cd(struct mmc_host *host)
+ }
+ EXPORT_SYMBOL(mmc_gpio_get_cd);
+ 
++/**
++ * mmc_gpio_request_ro - request a gpio for write-protection
++ * @host: mmc host
++ * @gpio: gpio number requested
++ *
++ * As devm_* managed functions are used in mmc_gpio_request_ro(), client
++ * drivers do not need to worry about freeing up memory.
++ *
++ * Returns zero on success, else an error.
++ */
++int mmc_gpio_request_ro(struct mmc_host *host, unsigned int gpio)
++{
++	struct mmc_gpio *ctx = host->slot.handler_priv;
++	int ret;
++
++	if (!gpio_is_valid(gpio))
++		return -EINVAL;
++
++	ret = devm_gpio_request_one(host->parent, gpio, GPIOF_DIR_IN,
++				    ctx->ro_label);
++	if (ret < 0)
++		return ret;
++
++	ctx->override_ro_active_level = true;
++	ctx->ro_gpio = gpio_to_desc(gpio);
++
++	return 0;
++}
++EXPORT_SYMBOL(mmc_gpio_request_ro);
++
+ void mmc_gpiod_request_cd_irq(struct mmc_host *host)
+ {
+ 	struct mmc_gpio *ctx = host->slot.handler_priv;
+@@ -161,6 +193,50 @@ void mmc_gpio_set_cd_isr(struct mmc_host *host,
+ }
+ EXPORT_SYMBOL(mmc_gpio_set_cd_isr);
+ 
++/**
++ * mmc_gpio_request_cd - request a gpio for card-detection
++ * @host: mmc host
++ * @gpio: gpio number requested
++ * @debounce: debounce time in microseconds
++ *
++ * As devm_* managed functions are used in mmc_gpio_request_cd(), client
++ * drivers do not need to worry about freeing up memory.
++ *
++ * If GPIO debouncing is desired, set the debounce parameter to a non-zero
++ * value. The caller is responsible for ensuring that the GPIO driver associated
++ * with the GPIO supports debouncing, otherwise an error will be returned.
++ *
++ * Returns zero on success, else an error.
++ */
++int mmc_gpio_request_cd(struct mmc_host *host, unsigned int gpio,
++			unsigned int debounce)
++{
++	struct mmc_gpio *ctx = host->slot.handler_priv;
++	int ret;
++
++	ret = devm_gpio_request_one(host->parent, gpio, GPIOF_DIR_IN,
++				    ctx->cd_label);
++	if (ret < 0)
++		/*
++		 * don't bother freeing memory. It might still get used by other
++		 * slot functions, in any case it will be freed, when the device
++		 * is destroyed.
++		 */
++		return ret;
++
++	if (debounce) {
++		ret = gpio_set_debounce(gpio, debounce);
++		if (ret < 0)
++			return ret;
++	}
++
++	ctx->override_cd_active_level = true;
++	ctx->cd_gpio = gpio_to_desc(gpio);
++
++	return 0;
++}
++EXPORT_SYMBOL(mmc_gpio_request_cd);
++
+ /**
+  * mmc_gpiod_request_cd - request a gpio descriptor for card-detection
+  * @host: mmc host
+@@ -171,7 +247,8 @@ EXPORT_SYMBOL(mmc_gpio_set_cd_isr);
+  * @gpio_invert: will return whether the GPIO line is inverted or not, set
+  * to NULL to ignore
+  *
+- * Note that this must be called prior to mmc_add_host()
++ * Use this function in place of mmc_gpio_request_cd() to use the GPIO
++ * descriptor API.  Note that it must be called prior to mmc_add_host()
+  * otherwise the caller must also call mmc_gpiod_request_cd_irq().
+  *
+  * Returns zero on success, else an error.
+@@ -221,6 +298,9 @@ EXPORT_SYMBOL(mmc_can_gpio_cd);
+  * @gpio_invert: will return whether the GPIO line is inverted or not,
+  * set to NULL to ignore
+  *
++ * Use this function in place of mmc_gpio_request_ro() to use the GPIO
++ * descriptor API.
++ *
+  * Returns zero on success, else an error.
+  */
+ int mmc_gpiod_request_ro(struct mmc_host *host, const char *con_id,
+diff --git a/drivers/mmc/host/mmc_spi.c b/drivers/mmc/host/mmc_spi.c
+index 7083d8ddd..297585a76 100644
+--- a/drivers/mmc/host/mmc_spi.c
++++ b/drivers/mmc/host/mmc_spi.c
+@@ -1422,16 +1422,13 @@ static int mmc_spi_probe(struct spi_device *spi)
+ 	if (status != 0)
+ 		goto fail_add_host;
+ 
+-	/*
+-	 * Index 0 is card detect
+-	 * Old boardfiles were specifying 1 ms as debounce
+-	 */
+-	status = mmc_gpiod_request_cd(mmc, NULL, 0, false, 1, NULL);
+-	if (status == -EPROBE_DEFER)
+-		goto fail_add_host;
+-	if (!status) {
+-		/*
+-		 * The platform has a CD GPIO signal that may support
++	if (host->pdata && host->pdata->flags & MMC_SPI_USE_CD_GPIO) {
++		status = mmc_gpio_request_cd(mmc, host->pdata->cd_gpio,
++					     host->pdata->cd_debounce);
++		if (status != 0)
++			goto fail_add_host;
++
++		/* The platform has a CD GPIO signal that may support
+ 		 * interrupts, so let mmc_gpiod_request_cd_irq() decide
+ 		 * if polling is needed or not.
+ 		 */
+@@ -1440,12 +1437,12 @@ static int mmc_spi_probe(struct spi_device *spi)
+ 	}
+ 	mmc_detect_change(mmc, 0);
+ 
+-	/* Index 1 is write protect/read only */
+-	status = mmc_gpiod_request_ro(mmc, NULL, 1, 0, NULL);
+-	if (status == -EPROBE_DEFER)
+-		goto fail_add_host;
+-	if (!status)
++	if (host->pdata && host->pdata->flags & MMC_SPI_USE_RO_GPIO) {
+ 		has_ro = true;
++		status = mmc_gpio_request_ro(mmc, host->pdata->ro_gpio);
++		if (status != 0)
++			goto fail_add_host;
++	}
+ 
+ 	dev_info(&spi->dev, "SD/MMC host %s%s%s%s%s\n",
+ 			dev_name(&mmc->class_dev),
+diff --git a/drivers/mmc/host/of_mmc_spi.c b/drivers/mmc/host/of_mmc_spi.c
+index 3c4d950a4..6fd5dcded 100644
+--- a/drivers/mmc/host/of_mmc_spi.c
++++ b/drivers/mmc/host/of_mmc_spi.c
+@@ -12,7 +12,9 @@
+ #include <linux/device.h>
+ #include <linux/slab.h>
+ #include <linux/irq.h>
++#include <linux/gpio.h>
+ #include <linux/of.h>
++#include <linux/of_gpio.h>
+ #include <linux/of_irq.h>
+ #include <linux/spi/spi.h>
+ #include <linux/spi/mmc_spi.h>
+@@ -26,7 +28,15 @@
+ 
+ MODULE_LICENSE("GPL");
+ 
++enum {
++	CD_GPIO = 0,
++	WP_GPIO,
++	NUM_GPIOS,
++};
++
+ struct of_mmc_spi {
++	int gpios[NUM_GPIOS];
++	bool alow_gpios[NUM_GPIOS];
+ 	int detect_irq;
+ 	struct mmc_spi_platform_data pdata;
+ };
+@@ -68,6 +78,30 @@ struct mmc_spi_platform_data *mmc_spi_get_pdata(struct spi_device *spi)
+ 	if (mmc_of_parse_voltage(np, &oms->pdata.ocr_mask) <= 0)
+ 		goto err_ocr;
+ 
++	for (i = 0; i < ARRAY_SIZE(oms->gpios); i++) {
++		enum of_gpio_flags gpio_flags;
++
++		oms->gpios[i] = of_get_gpio_flags(np, i, &gpio_flags);
++		if (!gpio_is_valid(oms->gpios[i]))
++			continue;
++
++		if (gpio_flags & OF_GPIO_ACTIVE_LOW)
++			oms->alow_gpios[i] = true;
++	}
++
++	if (gpio_is_valid(oms->gpios[CD_GPIO])) {
++		oms->pdata.cd_gpio = oms->gpios[CD_GPIO];
++		oms->pdata.flags |= MMC_SPI_USE_CD_GPIO;
++		if (!oms->alow_gpios[CD_GPIO])
++			oms->pdata.caps2 |= MMC_CAP2_CD_ACTIVE_HIGH;
++	}
++	if (gpio_is_valid(oms->gpios[WP_GPIO])) {
++		oms->pdata.ro_gpio = oms->gpios[WP_GPIO];
++		oms->pdata.flags |= MMC_SPI_USE_RO_GPIO;
++		if (!oms->alow_gpios[WP_GPIO])
++			oms->pdata.caps2 |= MMC_CAP2_RO_ACTIVE_HIGH;
++	}
++
+ 	oms->detect_irq = irq_of_parse_and_map(np, 0);
+ 	if (oms->detect_irq != 0) {
+ 		oms->pdata.init = of_mmc_spi_init;
+diff --git a/drivers/mmc/host/pxamci.c b/drivers/mmc/host/pxamci.c
+index b2bbcb09a..4b85a7fc2 100644
+--- a/drivers/mmc/host/pxamci.c
++++ b/drivers/mmc/host/pxamci.c
+@@ -27,9 +27,10 @@
+ #include <linux/mmc/slot-gpio.h>
+ #include <linux/io.h>
+ #include <linux/regulator/consumer.h>
+-#include <linux/gpio/consumer.h>
++#include <linux/gpio.h>
+ #include <linux/gfp.h>
+ #include <linux/of.h>
++#include <linux/of_gpio.h>
+ #include <linux/of_device.h>
+ 
+ #include <linux/sizes.h>
+@@ -59,8 +60,6 @@ struct pxamci_host {
+ 	unsigned int		imask;
+ 	unsigned int		power_mode;
+ 	unsigned long		detect_delay_ms;
+-	bool			use_ro_gpio;
+-	struct gpio_desc	*power;
+ 	struct pxamci_platform_data *pdata;
+ 
+ 	struct mmc_request	*mrq;
+@@ -99,13 +98,16 @@ static inline int pxamci_set_power(struct pxamci_host *host,
+ {
+ 	struct mmc_host *mmc = host->mmc;
+ 	struct regulator *supply = mmc->supply.vmmc;
++	int on;
+ 
+ 	if (!IS_ERR(supply))
+ 		return mmc_regulator_set_ocr(mmc, supply, vdd);
+ 
+-	if (host->power) {
+-		bool on = !!((1 << vdd) & host->pdata->ocr_mask);
+-		gpiod_set_value(host->power, on);
++	if (host->pdata &&
++	    gpio_is_valid(host->pdata->gpio_power)) {
++		on = ((1 << vdd) & host->pdata->ocr_mask);
++		gpio_set_value(host->pdata->gpio_power,
++			       !!on ^ host->pdata->gpio_power_invert);
+ 	}
+ 
+ 	if (host->pdata && host->pdata->setpower)
+@@ -427,7 +429,7 @@ static int pxamci_get_ro(struct mmc_host *mmc)
+ {
+ 	struct pxamci_host *host = mmc_priv(mmc);
+ 
+-	if (host->use_ro_gpio)
++	if (host->pdata && gpio_is_valid(host->pdata->gpio_card_ro))
+ 		return mmc_gpio_get_ro(mmc);
+ 	if (host->pdata && host->pdata->get_ro)
+ 		return !!host->pdata->get_ro(mmc_dev(mmc));
+@@ -725,38 +727,52 @@ static int pxamci_probe(struct platform_device *pdev)
+ 	}
+ 
+ 	if (host->pdata) {
++		int gpio_cd = host->pdata->gpio_card_detect;
++		int gpio_ro = host->pdata->gpio_card_ro;
++		int gpio_power = host->pdata->gpio_power;
++
+ 		host->detect_delay_ms = host->pdata->detect_delay_ms;
+ 
+-		host->power = devm_gpiod_get_optional(dev, "power", GPIOD_OUT_LOW);
+-		if (IS_ERR(host->power)) {
+-			dev_err(dev, "Failed requesting gpio_power\n");
+-			goto out;
++		if (gpio_is_valid(gpio_power)) {
++			ret = devm_gpio_request(dev, gpio_power,
++						"mmc card power");
++			if (ret) {
++				dev_err(dev,
++					"Failed requesting gpio_power %d\n",
++					gpio_power);
++				goto out;
++			}
++			gpio_direction_output(gpio_power,
++					      host->pdata->gpio_power_invert);
+ 		}
+ 
+-		/* FIXME: should we pass detection delay to debounce? */
+-		ret = mmc_gpiod_request_cd(mmc, "cd", 0, false, 0, NULL);
+-		if (ret && ret != -ENOENT) {
+-			dev_err(dev, "Failed requesting gpio_cd\n");
+-			goto out;
++		if (gpio_is_valid(gpio_ro)) {
++			ret = mmc_gpio_request_ro(mmc, gpio_ro);
++			if (ret) {
++				dev_err(dev,
++					"Failed requesting gpio_ro %d\n",
++					gpio_ro);
++				goto out;
++			} else {
++				mmc->caps2 |= host->pdata->gpio_card_ro_invert ?
++					0 : MMC_CAP2_RO_ACTIVE_HIGH;
++			}
+ 		}
+ 
+-		if (!host->pdata->gpio_card_ro_invert)
+-			mmc->caps2 |= MMC_CAP2_RO_ACTIVE_HIGH;
+-
+-		ret = mmc_gpiod_request_ro(mmc, "wp", 0, 0, NULL);
+-		if (ret && ret != -ENOENT) {
+-			dev_err(dev, "Failed requesting gpio_ro\n");
++		if (gpio_is_valid(gpio_cd))
++			ret = mmc_gpio_request_cd(mmc, gpio_cd, 0);
++		if (ret) {
++			dev_err(dev, "Failed requesting gpio_cd %d\n",
++				gpio_cd);
+ 			goto out;
+ 		}
+-		if (!ret)
+-			host->use_ro_gpio = true;
+ 
+ 		if (host->pdata->init)
+ 			host->pdata->init(dev, pxamci_detect_irq, mmc);
+ 
+-		if (host->power && host->pdata->setpower)
++		if (gpio_is_valid(gpio_power) && host->pdata->setpower)
+ 			dev_warn(dev, "gpio_power and setpower() both defined\n");
+-		if (host->use_ro_gpio && host->pdata->get_ro)
++		if (gpio_is_valid(gpio_ro) && host->pdata->get_ro)
+ 			dev_warn(dev, "gpio_ro and get_ro() both defined\n");
+ 	}
+ 
+diff --git a/drivers/pcmcia/soc_common.c b/drivers/pcmcia/soc_common.c
+index 3a8c84bb1..607231129 100644
+--- a/drivers/pcmcia/soc_common.c
++++ b/drivers/pcmcia/soc_common.c
+@@ -740,16 +740,50 @@ static struct pccard_operations soc_common_pcmcia_operations = {
+ 	.set_mem_map		= soc_common_pcmcia_set_mem_map,
+ };
+ 
++static LIST_HEAD(soc_pcmcia_sockets);
++static DEFINE_MUTEX(soc_pcmcia_sockets_lock);
+ 
+ #ifdef CONFIG_CPU_FREQ
+-static int soc_common_pcmcia_cpufreq_nb(struct notifier_block *nb,
++static int soc_pcmcia_notifier(struct notifier_block *nb,
+ 	unsigned long val, void *data)
+ {
+-	struct soc_pcmcia_socket *skt = container_of(nb, struct soc_pcmcia_socket, cpufreq_nb);
++	struct soc_pcmcia_socket *skt;
+ 	struct cpufreq_freqs *freqs = data;
++	int ret = 0;
+ 
+-	return skt->ops->frequency_change(skt, val, freqs);
++	mutex_lock(&soc_pcmcia_sockets_lock);
++	list_for_each_entry(skt, &soc_pcmcia_sockets, node)
++		if (skt->ops->frequency_change)
++			ret += skt->ops->frequency_change(skt, val, freqs);
++	mutex_unlock(&soc_pcmcia_sockets_lock);
++
++	return ret;
+ }
++
++static struct notifier_block soc_pcmcia_notifier_block = {
++	.notifier_call	= soc_pcmcia_notifier
++};
++
++static int soc_pcmcia_cpufreq_register(void)
++{
++	int ret;
++
++	ret = cpufreq_register_notifier(&soc_pcmcia_notifier_block,
++					CPUFREQ_TRANSITION_NOTIFIER);
++	if (ret < 0)
++		printk(KERN_ERR "Unable to register CPU frequency change "
++				"notifier for PCMCIA (%d)\n", ret);
++	return ret;
++}
++fs_initcall(soc_pcmcia_cpufreq_register);
++ 
++static void soc_pcmcia_cpufreq_unregister(void)
++{
++	cpufreq_unregister_notifier(&soc_pcmcia_notifier_block,
++		CPUFREQ_TRANSITION_NOTIFIER);
++}
++module_exit(soc_pcmcia_cpufreq_unregister);
++
+ #endif
+ 
+ void soc_pcmcia_init_one(struct soc_pcmcia_socket *skt,
+@@ -769,21 +803,19 @@ EXPORT_SYMBOL(soc_pcmcia_init_one);
+ 
+ void soc_pcmcia_remove_one(struct soc_pcmcia_socket *skt)
+ {
++	mutex_lock(&soc_pcmcia_sockets_lock);
+ 	del_timer_sync(&skt->poll_timer);
+ 
+ 	pcmcia_unregister_socket(&skt->socket);
+ 
+-#ifdef CONFIG_CPU_FREQ
+-	if (skt->ops->frequency_change)
+-		cpufreq_unregister_notifier(&skt->cpufreq_nb,
+-					    CPUFREQ_TRANSITION_NOTIFIER);
+-#endif
+-
+ 	soc_pcmcia_hw_shutdown(skt);
+ 
+ 	/* should not be required; violates some lowlevel drivers */
+ 	soc_common_pcmcia_config_skt(skt, &dead_socket);
+ 
++	list_del(&skt->node);
++	mutex_unlock(&soc_pcmcia_sockets_lock);
++
+ 	iounmap(skt->virt_io);
+ 	skt->virt_io = NULL;
+ 	release_resource(&skt->res_attr);
+@@ -824,6 +856,10 @@ int soc_pcmcia_add_one(struct soc_pcmcia_socket *skt)
+ 		goto out_err_5;
+ 	}
+ 
++	mutex_lock(&soc_pcmcia_sockets_lock);
++
++	list_add(&skt->node, &soc_pcmcia_sockets);
++
+ 	/*
+ 	 * We initialize default socket timing here, because
+ 	 * we are not guaranteed to see a SetIOMap operation at
+@@ -844,23 +880,14 @@ int soc_pcmcia_add_one(struct soc_pcmcia_socket *skt)
+ 
+ 	skt->status = soc_common_pcmcia_skt_state(skt);
+ 
+-#ifdef CONFIG_CPU_FREQ
+-	if (skt->ops->frequency_change) {
+-		skt->cpufreq_nb.notifier_call = soc_common_pcmcia_cpufreq_nb;
+-
+-		ret = cpufreq_register_notifier(&skt->cpufreq_nb,
+-						CPUFREQ_TRANSITION_NOTIFIER);
+-		if (ret < 0)
+-			dev_err(skt->socket.dev.parent,
+-				"unable to register CPU frequency change notifier for PCMCIA (%d)\n",
+-				ret);
+-	}
+-#endif
+-
+ 	ret = pcmcia_register_socket(&skt->socket);
+ 	if (ret)
+ 		goto out_err_7;
+ 
++	add_timer(&skt->poll_timer);
++
++	mutex_unlock(&soc_pcmcia_sockets_lock);
++
+ 	ret = device_create_file(&skt->socket.dev, &dev_attr_status);
+ 	if (ret)
+ 		goto out_err_8;
+@@ -868,12 +895,15 @@ int soc_pcmcia_add_one(struct soc_pcmcia_socket *skt)
+ 	return ret;
+ 
+  out_err_8:
++	mutex_lock(&soc_pcmcia_sockets_lock);
+ 	del_timer_sync(&skt->poll_timer);
+ 	pcmcia_unregister_socket(&skt->socket);
+ 
+  out_err_7:
+ 	soc_pcmcia_hw_shutdown(skt);
+  out_err_6:
++	list_del(&skt->node);
++	mutex_unlock(&soc_pcmcia_sockets_lock);
+ 	iounmap(skt->virt_io);
+  out_err_5:
+ 	release_resource(&skt->res_attr);
+diff --git a/drivers/pcmcia/soc_common.h b/drivers/pcmcia/soc_common.h
+index b7f993f1b..e286b857d 100644
+--- a/drivers/pcmcia/soc_common.h
++++ b/drivers/pcmcia/soc_common.h
+@@ -78,9 +78,6 @@ struct soc_pcmcia_socket {
+ 
+ 	unsigned int		irq_state;
+ 
+-#ifdef CONFIG_CPU_FREQ
+-	struct notifier_block	cpufreq_nb;
+-#endif
+ 	struct timer_list	poll_timer;
+ 	struct list_head	node;
+ 	void *driver_data;
+diff --git a/include/linux/mmc/slot-gpio.h b/include/linux/mmc/slot-gpio.h
+index 0de3d7c01..1186dcf8e 100644
+--- a/include/linux/mmc/slot-gpio.h
++++ b/include/linux/mmc/slot-gpio.h
+@@ -14,7 +14,11 @@
+ struct mmc_host;
+ 
+ int mmc_gpio_get_ro(struct mmc_host *host);
++int mmc_gpio_request_ro(struct mmc_host *host, unsigned int gpio);
+ int mmc_gpio_get_cd(struct mmc_host *host);
++int mmc_gpio_request_cd(struct mmc_host *host, unsigned int gpio,
++			unsigned int debounce);
++
+ int mmc_gpiod_request_cd(struct mmc_host *host, const char *con_id,
+ 			 unsigned int idx, bool override_active_level,
+ 			 unsigned int debounce, bool *gpio_invert);
+diff --git a/include/linux/platform_data/mmc-pxamci.h b/include/linux/platform_data/mmc-pxamci.h
+index 7e44e84e7..752f97c62 100644
+--- a/include/linux/platform_data/mmc-pxamci.h
++++ b/include/linux/platform_data/mmc-pxamci.h
+@@ -15,7 +15,11 @@ struct pxamci_platform_data {
+ 	int (*get_ro)(struct device *);
+ 	int (*setpower)(struct device *, unsigned int);
+ 	void (*exit)(struct device *, void *);
++	int gpio_card_detect;			/* gpio detecting card insertion */
++	int gpio_card_ro;			/* gpio detecting read only toggle */
+ 	bool gpio_card_ro_invert;		/* gpio ro is inverted */
++	int gpio_power;				/* gpio powering up MMC bus */
++	bool gpio_power_invert;			/* gpio power is inverted */
+ };
+ 
+ extern void pxa_set_mci_info(struct pxamci_platform_data *info);
+diff --git a/include/linux/spi/mmc_spi.h b/include/linux/spi/mmc_spi.h
+index 778ae8eb1..bfde741a5 100644
+--- a/include/linux/spi/mmc_spi.h
++++ b/include/linux/spi/mmc_spi.h
+@@ -8,6 +8,11 @@
+ struct device;
+ struct mmc_host;
+ 
++#define MMC_SPI_USE_CD_GPIO			(1 << 0)
++#define MMC_SPI_USE_RO_GPIO			(1 << 1)
++#define MMC_SPI_CD_GPIO_ACTIVE_LOW		(1 << 2)
++#define MMC_SPI_RO_GPIO_ACTIVE_LOW		(1 << 3)
++
+ /* Put this in platform_data of a device being used to manage an MMC/SD
+  * card slot.  (Modeled after PXA mmc glue; see that for usage examples.)
+  *
+@@ -22,6 +27,16 @@ struct mmc_spi_platform_data {
+ 		void *);
+ 	void (*exit)(struct device *, void *);
+ 
++	/*
++	 * Card Detect and Read Only GPIOs. To enable debouncing on the card
++	 * detect GPIO, set the cd_debounce to the debounce time in
++	 * microseconds.
++	 */
++	unsigned int flags;
++	unsigned int cd_gpio;
++	unsigned int cd_debounce;
++	unsigned int ro_gpio;
++
+ 	/* Capabilities to pass into mmc core (e.g. MMC_CAP_NEEDS_POLL). */
+ 	unsigned long caps;
+ 	unsigned long caps2;
+-- 
+2.25.0
+
