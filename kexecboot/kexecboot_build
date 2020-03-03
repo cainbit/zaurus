@@ -1,0 +1,11 @@
+klibc
+
+make ARCH=arm KLIBCKERNELSRC=`pwd`/../linux-4.14.18-c3x00/usr install -j4
+
+kexecboot
+
+CC=~/workspace/zaurus/klibc/bin/klcc ./configure --host=arm --enable-delay=3 --enable-timeout=60 --enable-evdev-rate=1000,250 --enable-fbui-width=640 --enable-fbui-height=480 --enable-bpp=16
+
+initramfs
+
+find . | cpio -o -H newc | xz --check=crc32 --lzma2=dict=512KB > ../initramfs.cpio.xz
