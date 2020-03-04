@@ -1,4 +1,4 @@
-From 8b4ba0ebc9f032b3e2f4c7f825b3ac4e86d4992a Mon Sep 17 00:00:00 2001
+From d66ea59cea3568a0c67b64e088d1dca9d4d9e063 Mon Sep 17 00:00:00 2001
 From: Cain Wu <cainbit@gmail.com>
 Date: Sun, 1 Mar 2020 17:52:43 +0800
 Subject: [PATCH] fix for Zaurus C3100
@@ -446,7 +446,7 @@ index b2bbcb09a..4b85a7fc2 100644
  	}
  
 diff --git a/drivers/pcmcia/soc_common.c b/drivers/pcmcia/soc_common.c
-index 3a8c84bb1..607231129 100644
+index 3a8c84bb1..c3e4099f7 100644
 --- a/drivers/pcmcia/soc_common.c
 +++ b/drivers/pcmcia/soc_common.c
 @@ -740,16 +740,50 @@ static struct pccard_operations soc_common_pcmcia_operations = {
@@ -474,7 +474,7 @@ index 3a8c84bb1..607231129 100644
 +	mutex_unlock(&soc_pcmcia_sockets_lock);
 +
 +	return ret;
- }
++}
 +
 +static struct notifier_block soc_pcmcia_notifier_block = {
 +	.notifier_call	= soc_pcmcia_notifier
@@ -492,12 +492,12 @@ index 3a8c84bb1..607231129 100644
 +	return ret;
 +}
 +fs_initcall(soc_pcmcia_cpufreq_register);
-+ 
++
 +static void soc_pcmcia_cpufreq_unregister(void)
 +{
 +	cpufreq_unregister_notifier(&soc_pcmcia_notifier_block,
 +		CPUFREQ_TRANSITION_NOTIFIER);
-+}
+ }
 +module_exit(soc_pcmcia_cpufreq_unregister);
 +
  #endif
